@@ -1,0 +1,201 @@
+#!/usr/bin/env ruby
+
+# https://github.com/splunk/splunk-sdk-ruby/blob/master/examples/run_examples.rb
+#$LOAD_PATH.unshift('../' + File.dirname(__FILE__) + 'lib')
+
+require 'optparse'
+require 'cifsdk'
+require 'pp'
+require 'logger'
+require 'logger/colors'
+require 'yaml'
+require 'terminal-table'
+
+REMOTE_DEFAULT = 'https://localhost'
+COMMAND_DEFAULT = 'search'
+CONFIG_PATH_DEFAULT = ENV['HOME'] + '/.cif.yml'
+
+COLS_DEFAULT = %w(tlp group reporttime indicator firsttime lasttime count tags description confidence
+                rdata provider)
+
+def make_table(cols=COLS_DEFAULT,rows=[])
+  table = Terminal::Table.new :headings => cols
+
+  if rows.is_a?(Hash) # only got one
+    rows = [rows]
+  end
+
+  for obs in rows.sort_by { |hsh| hsh['reporttime'] }
+    rr = []
+    for col in cols
+      y = obs[col]
+      if y.is_a?(Array)
+        y = y.join(',')
+      end
+      rr << y
+    end
+    table << rr
+  end
+  return table
+end
+
+command = COMMAND_DEFAULT
+
+logger = Logger.new(STDERR)
+logger.level = Logger::ERROR
+
+conf = {}
+conf['logger']        = logger
+conf['columns']       = COLS_DEFAULT
+conf['config_path']   = CONFIG_PATH_DEFAULT
+
+filters = {}
+
+parser = OptionParser.new do |op|
+  op.on('-R', "--remote REMOTE", String, "Set host (default: " + REMOTE_DEFAULT + ")") do |s|
+    conf['remote'] = s
+  end
+
+  op.on('-T','--token TOKEN', String, "Set token for authentication (default: 1234)") do |s|
+    conf['token'] = s
+  end
+
+  op.on('--[no-]verify-ssl','do not verify SSL') do |s|
+    conf['verify_ssl'] = s
+  end
+
+  op.on('-p', '--ping', 'ping the remote') do |s|
+    command = 'ping'
+  end
+
+  op.on('-l INT', '--limit', Integer, 'limit results') do |s|
+    filters['limit'] = s
+  end
+
+  op.on('-q', '--query STRING', String, 'search for something') do |s|
+    command = 'search'
+    filters['q'] = s
+  end
+
+  op.on('-s', '--search STRING', String, 'search for something') do |s|
+    command = 'search'
+    filters['q'] = s
+  end
+
+  op.on('-n', '--nolog', Integer, 'do not log the search') do |s|
+    filters['nolog'] = 1
+  end
+
+  op.on('--submit JSON', String, 'submit a json encoded string') do |s|
+    command = 'submit'
+    conf['submission'] = s
+  end
+
+  op.on('-v','--verbose', 'turn up logging') do |s|
+    logger.level = Logger::INFO
+  end
+
+  op.on('-d','--debug', 'set logging to debug') do |s|
+    logger.level = Logger::DEBUG
+  end
+
+  op.on('-C','--conf CONFIG_PATH', String, "set config path, default #{CONFIG_PATH_DEFAULT}") do |s|
+    conf['config_path'] = s
+  end
+
+  op.on('--cols COLUMNS', String, "Columns to output...") do |s|
+    conf['columns'] = s
+  end
+
+  op.on('--search-id ID', String, "Find by Id") do |s|
+    filters['id'] = s
+  end
+
+  op.on('--tags STRING', String, 'Filter by tags') do |s|
+    filters['tags'] = s
+  end
+  op.on('--cc STRING', String, 'Filter by country code') do |s|
+    filters['cc'] = s
+  end
+  op.on('--application STRING', String, 'Filter by application') do |s|
+    filters['application'] = s
+  end
+  op.on('--asn FLOAT', String, 'Filter by asn') do |s|
+    filters['asn'] = s
+  end
+  op.on('--itype STRING', String, 'Filter by indicator type (ipv4, fqdn, etc..)') do |s|
+    filters['itype'] = s
+  end
+  op.on('--provider STRING', String, 'Filter by provider') do |s|
+    filters['provider'] = s
+  end
+  op.on('-c INT', '--confidence', String, 'Filter by confidence') do |s|
+    filters['confidence'] = s
+  end
+  op.on('--group STRING', String, 'Filter by group') do |s|
+    filters['group'] = s
+  end
+
+  op.on('--rdata STRING', String, 'Filter by rdata') do |s|
+    filters['rdata'] = s
+  end
+
+  op.on('--tlp STRING', String, 'Filter by tlp') do |s|
+    filters['tlp'] = s
+  end
+end
+
+parser.parse!(ARGV)
+remote_override = conf['remote']
+if(File.exists?(conf['config_path']))
+  localconf = YAML.load_file(conf['config_path'].to_s)
+  conf.merge!(localconf['client']) if localconf['client']
+end
+
+conf['remote'] = remote_override if remote_override
+
+# http://stackoverflow.com/a/2149183/740097
+begin
+  mandatory = ['token','remote']
+  missing = mandatory.select{ |param| conf[param].nil? }
+  if not missing.empty?
+    puts "Missing options: #{missing.join(', ')}"
+    puts parser
+    exit
+  end
+rescue OptionParser::InvalidOption, OptionParser::MissingArgument
+  puts $!.to_s
+  puts parser
+  exit
+end
+
+logger.debug("Performing task with options: #{conf.inspect}")
+
+cli = CIFSDK::Client.new(conf)
+
+case command
+  when 'ping'
+    logger.level = Logger::INFO
+    for i in 0 ... 3
+      ret = cli.ping()
+      if(ret)
+        logger.info("roundtrip: #{ret}ms...")
+        select(nil,nil,nil,1)
+      else
+        break
+      end
+    end
+  when 'search-id'
+    r = cli.search_id(filters)
+    table = make_table(cols=conf['columns'],rows=r)
+    puts table
+  when 'search'
+    logger.info('running search...')
+    r = cli.search(filters)
+    table = make_table(cols=conf['columns'],rows=r)
+    puts table
+  when 'submit'
+    r = cli.submit(data=conf['submission'])
+    table = make_table(cols=conf['columns'],rows=r)
+    puts table
+  end
